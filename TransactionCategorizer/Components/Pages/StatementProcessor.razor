@@ -1,0 +1,235 @@
+﻿@page "/"
+@rendermode InteractiveServer
+
+@inject PiiRedactor PiiRedactor
+@inject GeminiExtractor GeminiExtractor
+@inject IJSRuntime JS
+
+<PageTitle>Statement Processor</PageTitle>
+
+<div class="container py-4" style="max-width:960px">
+    <h1 class="fw-bold mb-1">Bank Statement Processor</h1>
+    <p class="text-secondary mb-4">Upload a PDF bank statement to extract and categorize transactions.</p>
+
+    @* ── Step 1: Upload ─────────────────────────────────────────────── *@
+    <div class="card mb-3 shadow-sm" aria-labelledby="upload-heading">
+        <div class="card-body">
+            <h2 id="upload-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
+                <span class="badge bg-primary text-white me-2">1</span> Upload PDF
+            </h2>
+
+            <InputFile OnChange="OnFileSelected"
+                       accept=".pdf"
+                       class="form-control"
+                       disabled="@IsProcessing"
+                       aria-label="Select a PDF bank statement" />
+
+            @if (_selectedFile is not null)
+            {
+                <p class="small text-secondary mb-0 mt-2">
+                    <strong class="text-body">@_selectedFile.Name</strong>
+                    &nbsp;(@FormatBytes(_selectedFile.Size))
+                </p>
+            }
+        </div>
+    </div>
+
+    @* ── Step 2: Options ────────────────────────────────────────────── *@
+    <div class="card mb-3 shadow-sm" aria-labelledby="options-heading">
+        <div class="card-body">
+            <h2 id="options-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
+                <span class="badge bg-primary text-white me-2">2</span> Options
+            </h2>
+
+            <label for="context-input" class="form-label">
+                Additional context
+                <span class="text-muted fw-normal">(optional — e.g. "Canadian bank, CAD currency")</span>
+            </label>
+            <input id="context-input"
+                   type="text"
+                   class="form-control"
+                   placeholder="e.g. Canadian bank, CAD currency"
+                   @bind="_context"
+                   disabled="@IsProcessing" />
+        </div>
+    </div>
+
+    @* ── Step 3: Process ────────────────────────────────────────────── *@
+    <div class="card mb-3 shadow-sm" aria-labelledby="process-heading">
+        <div class="card-body">
+            <h2 id="process-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
+                <span class="badge bg-primary text-white me-2">3</span> Process
+            </h2>
+
+            <button class="btn btn-primary"
+                    @onclick="ProcessAsync"
+                    disabled="@(_selectedFile is null || IsProcessing)">
+                @if (IsProcessing)
+                {
+                    <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                    <span>@_statusMessage</span>
+                }
+                else
+                {
+                    <span>Extract Transactions</span>
+                }
+            </button>
+
+            @if (_error is not null)
+            {
+                <div class="alert alert-danger mb-0 mt-3" role="alert">
+                    <strong>Error:</strong> @_error
+                </div>
+            }
+        </div>
+    </div>
+
+    @* ── Step 4: Results & Download ─────────────────────────────────── *@
+    @if (_result is not null)
+    {
+        <div class="card border-success shadow-sm" aria-labelledby="results-heading">
+            <div class="card-body">
+                <h2 id="results-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
+                    <span class="badge bg-success text-white me-2">4</span> Results
+                </h2>
+
+                <div class="d-flex align-items-center mb-3 flex-wrap gap-2">
+                    <span class="badge bg-primary fs-6">@_result.Transactions.Count transaction(s)</span>
+                    @if (_result.StatementYear.HasValue)
+                    {
+                        <span class="badge bg-secondary fs-6">@_result.StatementYear</span>
+                    }
+                    <button class="btn btn-success btn-sm" @onclick="DownloadCsvAsync">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor"
+                             class="bi bi-download mb-1 me-1" viewBox="0 0 16 16">
+                            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5"/>
+                            <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708z"/>
+                        </svg>
+                        Download CSV
+                    </button>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="table-sm table-striped table-hover mb-0 table align-middle">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Date</th>
+                                <th>Post Date</th>
+                                <th>Description</th>
+                                <th class="text-end">Amount</th>
+                                <th>Category</th>
+                                <th>Source</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var t in _result.Transactions)
+                            {
+                                <tr>
+                                    <td class="text-nowrap">@t.Date</td>
+                                    <td class="text-secondary text-nowrap">@(t.PostDate ?? "—")</td>
+                                    <td>@t.Description</td>
+                                    <td class="text-end @(t.Amount < 0 ? "text-success fw-semibold" : "")">
+                                        @t.Amount.ToString("F2")
+                                    </td>
+                                    <td>
+                                        <span class="badge rounded-pill text-bg-light border">
+                                            @(t.Category ?? "—")
+                                        </span>
+                                    </td>
+                                    <td class="text-secondary small">@(t.TransactionSource ?? "—")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private IBrowserFile? _selectedFile;
+    private string? _context;
+    private string? _error;
+    private string _statusMessage = string.Empty;
+    private ExtractionResult? _result;
+    private byte[]? _csvBytes;
+
+    private bool IsProcessing { get; set; }
+
+    // 20 MB — generous limit for multi-page statements
+    private const long MaxFileSizeBytes = 20 * 1024 * 1024;
+
+    private void OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _selectedFile = e.File;
+        _result = null;
+        _csvBytes = null;
+        _error = null;
+    }
+
+    private async Task ProcessAsync()
+    {
+        if (_selectedFile is null) return;
+
+        _error = null;
+        _result = null;
+        _csvBytes = null;
+        IsProcessing = true;
+
+        try
+        {
+            // Read uploaded PDF
+            _statusMessage = "Reading file…";
+            StateHasChanged();
+
+            using var stream = _selectedFile.OpenReadStream(MaxFileSizeBytes);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            var pdfBytes = ms.ToArray();
+
+            // Redact PII before sending to the external API
+            _statusMessage = "Redacting PII…";
+            StateHasChanged();
+
+            var redacted = await Task.Run(() => PiiRedactor.Redact(pdfBytes));
+
+            // Send redacted PDF to Gemini
+            _statusMessage = "Extracting transactions (this may take a moment)…";
+            StateHasChanged();
+
+            _result = await GeminiExtractor.ExtractAsync(
+                redacted,
+                context: string.IsNullOrWhiteSpace(_context) ? null : _context);
+
+            // Pre-generate the CSV so the download is instant
+            _csvBytes = CsvExporter.Export(_result);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            IsProcessing = false;
+            _statusMessage = string.Empty;
+        }
+    }
+
+    private async Task DownloadCsvAsync()
+    {
+        if (_csvBytes is null || _result is null) return;
+
+        var fileName = $"transactions.csv";
+
+        await JS.InvokeVoidAsync("downloadFile", fileName, "text/csv", _csvBytes);
+    }
+
+    private static string FormatBytes(long bytes) =>
+        bytes switch
+        {
+            < 1024 => $"{bytes} B",
+            < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
+            _ => $"{bytes / (1024.0 * 1024):F1} MB",
+        };
+}
