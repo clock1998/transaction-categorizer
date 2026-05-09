@@ -6,11 +6,7 @@ on:
     tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ "master", "main" ]
-  # workflow_dispatch:
-  #   inputs:
-  #     tag:
-  #       description: 'Image tag to deploy'
-  #       required: false
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
