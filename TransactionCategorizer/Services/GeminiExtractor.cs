@@ -59,12 +59,12 @@ public sealed class GeminiExtractor
         _logger = logger;
         _categories = categoriesOptions.Value.Categories;
 
-        var key = options.Value.ApiKey ?? System.Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+        var key = options.Value.ApiKey ?? System.Environment.GetEnvironmentVariable("GEMINI_API_KEY");
 
         if (string.IsNullOrWhiteSpace(key))
             throw new InvalidOperationException(
-                "A Google API key is required. Set Gemini:ApiKey in configuration " +
-                "or the GOOGLE_API_KEY environment variable.");
+                "A Gemini API key is required. Set Gemini:ApiKey in configuration " +
+                "or the GEMINI_API_KEY environment variable.");
 
         _client = new Client(apiKey: key);
         _model = options.Value.Model;
