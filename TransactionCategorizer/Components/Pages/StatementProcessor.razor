@@ -15,7 +15,7 @@
     <div class="card mb-3 shadow-sm" aria-labelledby="upload-heading">
         <div class="card-body">
             <h2 id="upload-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
-                <span class="badge bg-primary text-white me-2">1</span> Upload PDF
+                <span class="badge bg-primary me-2 text-white">1</span> Upload PDF
             </h2>
 
             <InputFile OnChange="OnFileSelected"
@@ -38,7 +38,7 @@
     <div class="card mb-3 shadow-sm" aria-labelledby="options-heading">
         <div class="card-body">
             <h2 id="options-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
-                <span class="badge bg-primary text-white me-2">2</span> Options
+                <span class="badge bg-primary me-2 text-white">2</span> Options
             </h2>
 
             <label for="context-input" class="form-label">
@@ -58,7 +58,7 @@
     <div class="card mb-3 shadow-sm" aria-labelledby="process-heading">
         <div class="card-body">
             <h2 id="process-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
-                <span class="badge bg-primary text-white me-2">3</span> Process
+                <span class="badge bg-primary me-2 text-white">3</span> Process
             </h2>
 
             <button class="btn btn-primary"
@@ -90,7 +90,7 @@
         <div class="card border-success shadow-sm" aria-labelledby="results-heading">
             <div class="card-body">
                 <h2 id="results-heading" class="card-title d-flex align-items-center fs-5 fw-semibold mb-3">
-                    <span class="badge bg-success text-white me-2">4</span> Results
+                    <span class="badge bg-success me-2 text-white">4</span> Results
                 </h2>
 
                 <div class="d-flex align-items-center mb-3 flex-wrap gap-2">
@@ -226,10 +226,10 @@
     }
 
     private static string FormatBytes(long bytes) =>
-        bytes switch
-        {
-            < 1024 => $"{bytes} B",
-            < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
-            _ => $"{bytes / (1024.0 * 1024):F1} MB",
-        };
+    bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
+        _ => $"{bytes / (1024.0 * 1024):F1} MB",
+    };
 }
