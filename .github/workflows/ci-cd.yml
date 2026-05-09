@@ -117,7 +117,7 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${{ github.repository }}/docker-compose.yml ${{ secrets.SERVER_USER }}@192.168.1.4:$HOME/${{ github.repository }}/docker-compose.yml
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ./docker-compose.yml ${{ secrets.SERVER_USER }}@192.168.1.4:$HOME/TransactionCategorizer/docker-compose.yml
 
       - name: Deploy via SSH Loopback
         uses: appleboy/ssh-action@v1.2.4
@@ -131,8 +131,8 @@ jobs:
             export IMAGE=${{ env.REGISTRY }}/${{ github.repository }}:$TAG
             export GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}"
             docker pull $IMAGE
-            docker ps -aq --filter "name=${{ github.repository }}" | xargs -r docker rm -f
-            docker compose -f $HOME/${{ github.repository }}/docker-compose.yml -p ${{ github.repository }} up -d --remove-orphans --force-recreate
+            docker ps -aq --filter "name=TransactionCategorizer" | xargs -r docker rm -f
+            docker compose -f $HOME/TransactionCategorizer/docker-compose.yml -p TransactionCategorizer up -d --remove-orphans --force-recreate
 
       - name: Announce deployment
         run: |
