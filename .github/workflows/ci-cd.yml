@@ -106,12 +106,15 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
 
-      - name: Deploy via SSH Loopback
+      - name: Create directory on remote server
         uses: appleboy/ssh-action@v1.2.4
         with:
           host: 192.168.1.4
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p $HOME/TransactionCategorizer
+
       - name: Copy docker-compose.yml to remote server
         run: |
           mkdir -p ~/.ssh
