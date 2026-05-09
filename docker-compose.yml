@@ -1,8 +1,5 @@
 services:
   transaction-categorizer:
-    build:
-      context: ./TransactionCategorizer
-      dockerfile: Dockerfile
     image: transaction-categorizer:latest
     container_name: transaction-categorizer
     ports:
