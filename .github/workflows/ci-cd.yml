@@ -135,7 +135,7 @@ jobs:
             export GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}"
             docker pull $IMAGE
             docker ps -aq --filter "name=transaction-categorizer" | xargs -r docker rm -f
-            docker compose -f $HOME/transaction-categorizer/docker-compose.yml -p transaction-categorizer up -d --remove-orphans --force-recreate
+            docker compose -f $HOME/transaction-categorizer/docker-compose.yml -p transaction-categorizer up -d --remove-orphans --force-recreate --no-build
 
       - name: Announce deployment
         run: |
