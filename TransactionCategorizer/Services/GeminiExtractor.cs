@@ -61,8 +61,7 @@ public sealed class GeminiExtractor
 
         // Try configuration first (Gemini:ApiKey), then fall back to environment variables
         // ASP.NET Core uses double underscores for hierarchy: Gemini__ApiKey
-        var key = !string.IsNullOrWhiteSpace(options.Value.ApiKey) ? options.Value.ApiKey
-                  : System.Environment.GetEnvironmentVariable("Gemini__ApiKey");
+        var key = options.Value.ApiKey;
                   
 
         if (string.IsNullOrWhiteSpace(key))
