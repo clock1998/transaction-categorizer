@@ -6,6 +6,7 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_HTTP_PORTS=8080
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - Gemini__ApiKey=${GEMINI_API_KEY}
+      - Gemini__Model=gemini-2.5-flash
     container_name: transaction-categorizer
     restart: always

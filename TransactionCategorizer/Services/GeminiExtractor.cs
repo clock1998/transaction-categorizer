@@ -59,12 +59,16 @@ public sealed class GeminiExtractor
         _logger = logger;
         _categories = categoriesOptions.Value.Categories;
 
-        var key = options.Value.ApiKey ?? System.Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+        // Try configuration first (Gemini:ApiKey), then fall back to environment variables
+        // ASP.NET Core uses double underscores for hierarchy: Gemini__ApiKey
+        var key = !string.IsNullOrWhiteSpace(options.Value.ApiKey) ? options.Value.ApiKey
+                  : System.Environment.GetEnvironmentVariable("Gemini__ApiKey");
+                  
 
         if (string.IsNullOrWhiteSpace(key))
             throw new InvalidOperationException(
                 "A Gemini API key is required. Set Gemini:ApiKey in configuration " +
-                "or the GEMINI_API_KEY environment variable.");
+                "or the Gemini__ApiKey environment variable.");
 
         _client = new Client(apiKey: key);
         _model = options.Value.Model;
