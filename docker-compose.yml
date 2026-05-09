@@ -3,7 +3,7 @@ services:
     build:
       context: ./TransactionCategorizer
       dockerfile: Dockerfile
-    image: transactioncategorizer:latest
+    image: transaction-categorizer:latest
     container_name: transaction-categorizer
     ports:
       - "8080:8080"
