@@ -6,8 +6,9 @@ namespace TransactionCategorizer.Services;
 /// <summary>Serializes an <see cref="ExtractionResult"/> to UTF-8 CSV bytes.</summary>
 public static class CsvExporter
 {
-    private static readonly string[] Headers =
+    private static readonly string[] MultiFileHeaders =
     [
+        "Source File",
         "Date",
         "Post Date",
         "Description",
@@ -18,26 +19,27 @@ public static class CsvExporter
     ];
 
     /// <summary>
-    /// Converts an extraction result to CSV bytes (UTF-8 with BOM for Excel compatibility).
+    /// Converts a multi-file extraction result to CSV bytes (UTF-8 with BOM for Excel compatibility).
     /// </summary>
-    public static byte[] Export(ExtractionResult result)
+    public static byte[] ExportMultiFile(MultiFileExtractionResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
 
         var sb = new StringBuilder();
-        AppendRow(sb, Headers);
+        AppendRow(sb, MultiFileHeaders);
 
-        foreach (var t in result.Transactions)
+        foreach (var t in result.GetAllTransactions())
         {
             AppendRow(sb,
             [
+                t.SourceFile,
                 t.Date,
                 t.PostDate ?? string.Empty,
                 t.Description,
                 t.Amount.ToString("F2"),
                 t.Category ?? string.Empty,
                 t.TransactionSource ?? string.Empty,
-                result.StatementYear?.ToString() ?? string.Empty,
+                t.StatementYear?.ToString() ?? string.Empty,
             ]);
         }
 

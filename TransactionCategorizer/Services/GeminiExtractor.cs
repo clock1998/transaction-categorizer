@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using Google.GenAI;
 using Google.GenAI.Types;
 using Microsoft.Extensions.Options;
@@ -12,13 +13,23 @@ public sealed class GeminiExtractor
     private static readonly string PromptTemplate = """
         You are an expert financial data extraction assistant.
 
-        Analyze the attached bank statement PDF and extract **every** transaction.
+        Analyze the attached bank statement PDF(s) and extract **every** transaction from **each file**.
 
-        Return a JSON **object** with the following structure:
-        {{
-          "statement_year": <int — the year the statement covers, e.g. 2025>,
-          "transactions": [ ... ]
-        }}
+        {2}
+
+        Return a JSON **array** where each element represents one file with the following structure:
+        [
+          {{
+            "file_index": 0,
+            "statement_year": <int — the year the statement covers>,
+            "transactions": [ ... ]
+          }},
+          {{
+            "file_index": 1,
+            "statement_year": <int>,
+            "transactions": [ ... ]
+          }}
+        ]
 
         Each item in the "transactions" array must have these fields:
         - "date": transaction date in YYYY/MM/DD format
@@ -26,30 +37,29 @@ public sealed class GeminiExtractor
         - "description": merchant / payee description exactly as it appears
         - "amount": numeric amount (positive = debit/purchase, negative = credit/refund/payment)
         - "category": one of the allowed categories listed below
-        - "transaction_source": the credit card name / product title shown on the statement (e.g. "DESJARDINS ODYSSEE WORLDELITE MASTERCARD", "Scotia Momentum VISA Infinite Card")
+        - "transaction_source": the credit card name / product title shown on the statement
 
         Allowed categories:
         {0}
 
         Rules:
         1. Use ONLY the categories listed above. Pick the single best match.
-        2. If the year is not explicitly shown on a transaction line, infer it from the statement date or surrounding context.
-        3. Payments to the credit card itself should be negative amounts with category "Insurance and Financial Services".
-        4. Return ONLY the JSON object described above — no markdown fences, no commentary.
-        5. "statement_year" must be an integer representing the primary year the statement covers (e.g. if the statement period is Dec 2024 – Jan 2025, use the year that most transactions fall in).
+        2. Process each PDF separately and maintain the file order.
+        3. Each file result MUST include "file_index" matching the PDF order (0, 1, 2, etc.).
+        4. If the year is not explicitly shown, infer it from the statement date or context.
+        5. Payments to the credit card should be negative amounts with category "Insurance and Financial Services".
+        6. Return ONLY the JSON array described above — no markdown fences, no commentary.
+        7. Keep JSON compact (no pretty printing or extra whitespace) to minimize output size.
         {1}
         """;
-
-    private static readonly GenerateContentConfig GenerationConfig = new()
-    {
-        Temperature = 0.1f,
-        ResponseMimeType = "application/json",
-    };
 
     private readonly Client _client;
     private readonly string _model;
     private readonly ILogger<GeminiExtractor> _logger;
     private readonly IReadOnlyList<string> _categories;
+    private readonly int _timeoutSeconds;
+    private readonly int _maxOutputTokens;
+    private readonly GenerateContentConfig _generationConfig;
 
     public GeminiExtractor(
         IOptions<GeminiOptions> options,
@@ -59,114 +69,288 @@ public sealed class GeminiExtractor
         _logger = logger;
         _categories = categoriesOptions.Value.Categories;
 
-        // Try configuration first (Gemini:ApiKey), then fall back to environment variables
-        // ASP.NET Core uses double underscores for hierarchy: Gemini__ApiKey
-        var key = options.Value.ApiKey;
-                  
+        var geminiOptions = options.Value;
 
-        if (string.IsNullOrWhiteSpace(key))
+        // Validate API key
+        if (string.IsNullOrWhiteSpace(geminiOptions.ApiKey))
             throw new InvalidOperationException(
                 "A Gemini API key is required. Set Gemini:ApiKey in configuration " +
                 "or the Gemini__ApiKey environment variable.");
 
-        _client = new Client(apiKey: key);
-        _model = options.Value.Model;
+        _timeoutSeconds = geminiOptions.TimeoutSeconds;
+        _maxOutputTokens = geminiOptions.MaxOutputTokens;
+        _model = geminiOptions.Model;
+
+        if (_timeoutSeconds <= 0)
+            throw new InvalidOperationException("Gemini:TimeoutSeconds must be greater than 0.");
+
+        if (_maxOutputTokens <= 0)
+            throw new InvalidOperationException("Gemini:MaxOutputTokens must be greater than 0.");
+
+        _logger.LogInformation(
+            "Initializing Gemini client with model {Model}, timeout {TimeoutSeconds}s, max output tokens {MaxOutputTokens}",
+            _model,
+            _timeoutSeconds,
+            _maxOutputTokens);
+
+        var httpOptions = new HttpOptions
+        {
+            Timeout = checked(_timeoutSeconds * 1000)
+        };
+
+        _client = new Client(apiKey: geminiOptions.ApiKey, httpOptions: httpOptions);
+        _generationConfig = new GenerateContentConfig
+        {
+            Temperature = 0.1f,
+            ResponseMimeType = "application/json",
+            MaxOutputTokens = _maxOutputTokens,
+            HttpOptions = httpOptions
+        };
     }
 
-    public async Task<ExtractionResult> ExtractAsync(
-        byte[] pdfBytes,
+    public async Task<MultiFileExtractionResult> ExtractMultipleAsync(
+        IReadOnlyList<byte[]> pdfBytesList,
+        IReadOnlyList<string>? fileNames = null,
         IReadOnlyList<string>? categories = null,
         string? context = null,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(pdfBytes);
+        ArgumentNullException.ThrowIfNull(pdfBytesList);
 
-        _logger.LogInformation("Sending PDF ({Bytes} bytes) to Gemini model {Model}", pdfBytes.Length, _model);
+        if (pdfBytesList.Count == 0)
+            return new MultiFileExtractionResult([]);
 
-        var content = new Content
+        _logger.LogInformation("Sending {Count} PDF(s) in a single request to Gemini model {Model}", 
+            pdfBytesList.Count, _model);
+
+        // Create a timeout cancellation token source
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_timeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        try
         {
-            Role = "user",
-            Parts =
-            [
-                Part.FromText(BuildPrompt(categories, context)),
-                new Part { InlineData = new Blob { Data = pdfBytes, MimeType = "application/pdf" } },
-            ],
-        };
+            var prompt = BuildPrompt(pdfBytesList.Count, fileNames, categories, context);
+            var parts = new List<Part> { Part.FromText(prompt) };
 
-        var response = await _client.Models.GenerateContentAsync(
-            model: _model,
-            contents: [content],
-            config: GenerationConfig,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            // Add all PDF files as separate parts
+            foreach (var pdfBytes in pdfBytesList)
+            {
+                parts.Add(new Part 
+                { 
+                    InlineData = new Blob { Data = pdfBytes, MimeType = "application/pdf" } 
+                });
+            }
 
+            var content = new Content { Role = "user", Parts = [.. parts] };
+
+            var response = await _client.Models.GenerateContentAsync(
+                model: _model,
+                contents: [content],
+                config: _generationConfig,
+                cancellationToken: linkedCts.Token).ConfigureAwait(false);
+
+            var rawJson = ExtractJsonFromResponse(response);
+            _logger.LogDebug("Gemini raw JSON for {Count} file(s): {Raw}", pdfBytesList.Count, rawJson);
+
+            return ParseMultiFileJson(rawJson, fileNames);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            var timeoutMessage = $"Request timed out after {_timeoutSeconds} seconds. " +
+                $"Consider increasing Gemini:TimeoutSeconds in configuration for large batches.";
+
+            _logger.LogError("Failed to process {Count} file(s) in batch: {Error}", 
+                pdfBytesList.Count, timeoutMessage);
+
+            // Return error result for all files
+            var results = pdfBytesList.Select((_, index) =>
+            {
+                var fileName = GetFileName(index, fileNames);
+                return new FileExtractionResult(index, fileName, null, timeoutMessage);
+            }).ToList();
+
+            return new MultiFileExtractionResult(results);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process {Count} file(s) in batch", pdfBytesList.Count);
+
+            // Return error result for all files
+            var results = pdfBytesList.Select((_, index) =>
+            {
+                var fileName = GetFileName(index, fileNames);
+                return new FileExtractionResult(index, fileName, null, ex.Message);
+            }).ToList();
+
+            return new MultiFileExtractionResult(results);
+        }
+    }
+
+    private string BuildPrompt(
+        int fileCount, 
+        IReadOnlyList<string>? fileNames, 
+        IReadOnlyList<string>? categories, 
+        string? context)
+    {
+        var fileListBlock = BuildFileListBlock(fileCount, fileNames);
+        var categoryList = FormatCategoryList(categories);
+        var contextBlock = FormatContextBlock(context);
+        return string.Format(PromptTemplate, categoryList, contextBlock, fileListBlock);
+    }
+
+    private static string BuildFileListBlock(int fileCount, IReadOnlyList<string>? fileNames)
+    {
+        if (fileNames is null || fileNames.Count == 0)
+            return $"You will receive {fileCount} PDF file(s) in order.";
+
+        var fileList = string.Join('\n', fileNames.Select((name, i) => $"  {i}. {name}"));
+        return $"You will receive {fileCount} PDF file(s) in the following order:\n{fileList}";
+    }
+
+    private string FormatCategoryList(IReadOnlyList<string>? categories)
+    {
+        var categoriesToUse = categories ?? _categories;
+        return string.Join('\n', categoriesToUse.Select(c => $"- {c}"));
+    }
+
+    private static string FormatContextBlock(string? context)
+    {
+        if (string.IsNullOrWhiteSpace(context))
+            return string.Empty;
+
+        return $"\nAdditional context provided by the user:\n{context}\n";
+    }
+
+    private static string ExtractJsonFromResponse(GenerateContentResponse response)
+    {
         var text = response.Text
             ?? throw new InvalidOperationException("Gemini response contained no text.");
 
         var raw = StripMarkdownFences(text);
-        _logger.LogDebug("Gemini raw JSON: {Raw}", raw);
-        return ParseTransactionJson(raw);
+        return ExtractJsonArrayPayload(raw);
     }
 
-    private string BuildPrompt(IReadOnlyList<string>? categories, string? context)
+    private static string ExtractJsonArrayPayload(string text)
     {
-        var categoryList = string.Join('\n', (categories ?? _categories).Select(c => $"- {c}"));
-        var contextBlock = string.IsNullOrWhiteSpace(context)
-            ? string.Empty
-            : $"\nAdditional context provided by the user:\n{context}\n";
+        var firstBracket = text.IndexOf('[');
+        if (firstBracket < 0)
+            return text;
 
-        return string.Format(PromptTemplate, categoryList, contextBlock);
+        var lastBracket = text.LastIndexOf(']');
+        if (lastBracket < firstBracket)
+            throw new InvalidOperationException(
+                "Gemini response appears truncated before JSON array completed. Increase Gemini:MaxOutputTokens or reduce files per batch.");
+
+        return text[firstBracket..(lastBracket + 1)].Trim();
     }
 
     private static string StripMarkdownFences(string text)
     {
-        var s = text.Trim();
-        if (!s.StartsWith("```", StringComparison.Ordinal)) return s;
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+            return trimmed;
 
-        var newline = s.IndexOf('\n');
-        if (newline >= 0) s = s[(newline + 1)..];
+        // Remove opening fence and language identifier
+        var firstNewline = trimmed.IndexOf('\n');
+        if (firstNewline >= 0)
+            trimmed = trimmed[(firstNewline + 1)..];
 
-        var closingFence = s.LastIndexOf("```", StringComparison.Ordinal);
-        if (closingFence >= 0) s = s[..closingFence];
+        // Remove closing fence
+        var lastFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+        if (lastFence >= 0)
+            trimmed = trimmed[..lastFence];
 
-        return s.Trim();
+        return trimmed.Trim();
     }
 
-    private static ExtractionResult ParseTransactionJson(string json)
+    private static MultiFileExtractionResult ParseMultiFileJson(
+        string json, 
+        IReadOnlyList<string>? fileNames)
     {
-        var root = JsonNode.Parse(json)
-            ?? throw new InvalidOperationException("Gemini returned null JSON.");
-
-        int? statementYear = null;
-        JsonNode? arrayNode = root;
-
-        if (root is JsonObject obj)
+        JsonNode root;
+        try
         {
-            if (obj["statement_year"] is JsonValue yearVal && yearVal.TryGetValue(out int y))
-                statementYear = y;
+            root = JsonNode.Parse(json)
+                ?? throw new InvalidOperationException("Gemini returned null JSON.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException(
+                "Gemini returned invalid JSON for multi-file extraction. Increase Gemini:MaxOutputTokens or reduce files per batch.",
+                ex);
+        }
 
-            foreach (var key in new[] { "transactions", "data", "results" })
+        if (root is not JsonArray fileArray)
+            throw new InvalidOperationException(
+                $"Expected a JSON array for multiple files, got {root.GetType().Name}.");
+
+        var results = new List<FileExtractionResult>();
+
+        foreach (var fileNode in fileArray)
+        {
+            if (fileNode is not JsonObject fileObj)
+                continue;
+
+            var fileIndex = fileObj["file_index"]?.GetValue<int>() ?? results.Count;
+            var fileName = GetFileName(fileIndex, fileNames);
+            var statementYear = TryGetStatementYear(fileObj);
+            var transactions = ExtractTransactionsFromObject(fileObj);
+
+            var extractionResult = new ExtractionResult(statementYear, transactions);
+            results.Add(new FileExtractionResult(fileIndex, fileName, extractionResult, null));
+        }
+
+        return new MultiFileExtractionResult(results);
+    }
+
+    private static string GetFileName(int index, IReadOnlyList<string>? fileNames)
+    {
+        return fileNames is not null && index < fileNames.Count 
+            ? fileNames[index] 
+            : $"File {index + 1}";
+    }
+
+    private static int? TryGetStatementYear(JsonObject obj)
+    {
+        if (obj["statement_year"] is JsonValue yearValue && yearValue.TryGetValue(out int year))
+            return year;
+
+        return null;
+    }
+
+    private static IReadOnlyList<Transaction> ExtractTransactionsFromObject(JsonObject obj)
+    {
+        // Try common transaction array keys
+        JsonArray? transactionArray = null;
+        foreach (var key in new[] { "transactions", "data", "results" })
+        {
+            if (obj[key] is JsonArray arr)
             {
-                if (obj[key] is JsonArray arr) { arrayNode = arr; break; }
+                transactionArray = arr;
+                break;
             }
         }
 
-        if (arrayNode is not JsonArray transactionArray)
-            throw new InvalidOperationException(
-                $"Expected a JSON array of transactions, got {root.GetType().Name}.");
+        if (transactionArray is null)
+            throw new InvalidOperationException("No transaction array found in JSON object.");
 
-        var transactions = transactionArray
+        return transactionArray
             .OfType<JsonObject>()
-            .Select(item => ParseTransaction(item))
+            .Select(ParseTransaction)
             .ToList();
-
-        return new ExtractionResult(statementYear, transactions);
     }
 
-    private static Transaction ParseTransaction(JsonObject item) => new(
-        Date: item["date"]?.GetValue<string>() ?? string.Empty,
-        PostDate: item["post_date"]?.GetValue<string?>(),
-        Description: item["description"]?.GetValue<string>() ?? string.Empty,
-        Amount: item["amount"] is JsonValue amt ? (decimal)amt.GetValue<double>() : 0m,
-        Category: item["category"]?.GetValue<string?>(),
-        TransactionSource: item["transaction_source"]?.GetValue<string?>());
+    private static Transaction ParseTransaction(JsonObject item)
+    {
+        var date = item["date"]?.GetValue<string>() ?? string.Empty;
+        var postDate = item["post_date"]?.GetValue<string?>();
+        var description = item["description"]?.GetValue<string>() ?? string.Empty;
+        var amount = item["amount"] is JsonValue amountValue 
+            ? (decimal)amountValue.GetValue<double>() 
+            : 0m;
+        var category = item["category"]?.GetValue<string?>();
+        var transactionSource = item["transaction_source"]?.GetValue<string?>();
+
+        return new Transaction(date, postDate, description, amount, category, transactionSource);
+    }
 }
