@@ -6,11 +6,9 @@ public sealed record Transaction(
     string Description,
     decimal Amount,
     string? Category,
-    string? TransactionSource);
+    string? SourceFile);
 
-public sealed record ExtractionResult(
-    int? StatementYear,
-    IReadOnlyList<Transaction> Transactions);
+public sealed record ExtractionResult(IReadOnlyList<Transaction> Transactions);
 
 public sealed record FileExtractionResult(
     int FileIndex,
@@ -37,20 +35,17 @@ public sealed record MultiFileExtractionResult(
     {
         return SuccessfulFiles
             .SelectMany(f => f.Result!.Transactions.Select(t => 
-                new TransactionWithSource(t, f.FileName, f.Result.StatementYear)))
+                new TransactionWithSource(t)))
             .ToList();
     }
 }
 
-public sealed record TransactionWithSource(
-    Transaction Transaction,
-    string SourceFile,
-    int? StatementYear)
+public sealed record TransactionWithSource(Transaction Transaction)
 {
     public string Date => Transaction.Date;
     public string? PostDate => Transaction.PostDate;
     public string Description => Transaction.Description;
     public decimal Amount => Transaction.Amount;
     public string? Category => Transaction.Category;
-    public string? TransactionSource => Transaction.TransactionSource;
+    public string? SourceFile => Transaction.SourceFile;
 }

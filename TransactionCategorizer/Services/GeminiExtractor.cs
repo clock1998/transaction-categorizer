@@ -26,7 +26,7 @@ public sealed class GeminiExtractor
             "description": "MERCHANT NAME",
             "amount": 25.40,
             "category": "Groceries and Supermarkets",
-            "transaction_source": "Card name shown on statement"
+            "source_file": "statement-jan.pdf"
           }}
         ]
 
@@ -36,7 +36,7 @@ public sealed class GeminiExtractor
         - "description": merchant / payee description exactly as it appears
         - "amount": numeric amount (positive = debit/purchase, negative = credit/refund/payment)
         - "category": one of the allowed categories listed below
-        - "transaction_source": the credit card name / product title shown on the statement
+        - "source_file": the exact input PDF file name this transaction came from
 
         Allowed categories:
         {0}
@@ -46,8 +46,9 @@ public sealed class GeminiExtractor
         2. Merge all transactions from all PDFs into this single output array.
         3. If the year is not explicitly shown, infer it from the statement date or context.
         4. Payments to the credit card should be negative amounts with category "Insurance and Financial Services".
-        5. Return ONLY the JSON array described above — no markdown fences, no commentary.
-        6. Keep JSON compact (no pretty printing or extra whitespace) to minimize output size.
+        5. "source_file" must exactly match one of the provided input file names.
+        6. Return ONLY the JSON array described above — no markdown fences, no commentary.
+        7. Keep JSON compact (no pretty printing or extra whitespace) to minimize output size.
         {1}
         """;
 
@@ -283,23 +284,53 @@ public sealed class GeminiExtractor
             throw new InvalidOperationException(
                 $"Expected a JSON array of transactions, got {root.GetType().Name}.");
 
-        var transactions = transactionArray
-            .OfType<JsonObject>()
-            .Select(ParseTransaction)
-            .ToList();
+        var transactionsByFile = new Dictionary<string, List<Transaction>>(StringComparer.OrdinalIgnoreCase);
 
-        var combinedFileName = BuildCombinedFileName(fileNames, fileCount);
-        var extractionResult = new ExtractionResult(null, transactions);
-        var fileResult = new FileExtractionResult(0, combinedFileName, extractionResult, null);
-        return new MultiFileExtractionResult([fileResult]);
+        foreach (var item in transactionArray.OfType<JsonObject>())
+        {
+            var sourceFile = ResolveSourceFile(item, fileNames, fileCount);
+            var transaction = ParseTransaction(item, sourceFile);
+
+            if (!transactionsByFile.TryGetValue(sourceFile, out var list))
+            {
+                list = [];
+                transactionsByFile[sourceFile] = list;
+            }
+
+            list.Add(transaction);
+        }
+
+        var results = new List<FileExtractionResult>();
+
+        for (var i = 0; i < fileCount; i++)
+        {
+            var fileName = GetFileName(i, fileNames);
+            transactionsByFile.TryGetValue(fileName, out var transactions);
+            transactionsByFile.Remove(fileName);
+
+            var extractionResult = new ExtractionResult(transactions ?? []);
+            results.Add(new FileExtractionResult(i, fileName, extractionResult, null));
+        }
+
+        foreach (var extra in transactionsByFile)
+        {
+            var extractionResult = new ExtractionResult(extra.Value);
+            results.Add(new FileExtractionResult(results.Count, extra.Key, extractionResult, null));
+        }
+
+        return new MultiFileExtractionResult(results);
     }
 
-    private static string BuildCombinedFileName(IReadOnlyList<string>? fileNames, int fileCount)
+    private static string ResolveSourceFile(
+        JsonObject item,
+        IReadOnlyList<string>? fileNames,
+        int fileCount)
     {
-        if (fileCount == 1 && fileNames is not null && fileNames.Count > 0)
-            return fileNames[0];
+        var sourceFile = item["source_file"]?.GetValue<string?>();
+        if (!string.IsNullOrWhiteSpace(sourceFile))
+            return sourceFile.Trim();
 
-        return $"Combined ({fileCount} files)";
+        return fileCount == 1 ? GetFileName(0, fileNames) : "Unknown";
     }
 
     private static string GetFileName(int index, IReadOnlyList<string>? fileNames)
@@ -309,7 +340,7 @@ public sealed class GeminiExtractor
             : $"File {index + 1}";
     }
 
-    private static Transaction ParseTransaction(JsonObject item)
+    private static Transaction ParseTransaction(JsonObject item, string sourceFile)
     {
         var date = NormalizeDate(item["date"]?.GetValue<string>()) ?? string.Empty;
         var postDate = NormalizeDate(item["post_date"]?.GetValue<string?>());
@@ -318,9 +349,8 @@ public sealed class GeminiExtractor
             ? (decimal)amountValue.GetValue<double>() 
             : 0m;
         var category = item["category"]?.GetValue<string?>();
-        var transactionSource = item["transaction_source"]?.GetValue<string?>();
 
-        return new Transaction(date, postDate, description, amount, category, transactionSource);
+        return new Transaction(date, postDate, description, amount, category, sourceFile);
     }
 
     private static string? NormalizeDate(string? value)

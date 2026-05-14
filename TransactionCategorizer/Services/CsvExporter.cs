@@ -12,10 +12,8 @@ public static class CsvExporter
         "Date",
         "Post Date",
         "Description",
-        "Amount",
         "Category",
-        "Transaction Source",
-        "Statement Year",
+        "Amount",
     ];
 
     /// <summary>
@@ -32,14 +30,12 @@ public static class CsvExporter
         {
             AppendRow(sb,
             [
-                t.SourceFile,
+                t.SourceFile ?? string.Empty,
                 t.Date,
                 t.PostDate ?? string.Empty,
                 t.Description,
-                t.Amount.ToString("F2"),
                 t.Category ?? string.Empty,
-                t.TransactionSource ?? string.Empty,
-                t.StatementYear?.ToString() ?? string.Empty,
+                t.Amount.ToString("F2"),
             ]);
         }
 
