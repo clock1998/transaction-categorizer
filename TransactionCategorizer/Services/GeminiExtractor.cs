@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Text.Json;
+using System.Globalization;
 using Google.GenAI;
 using Google.GenAI.Types;
 using Microsoft.Extensions.Options;
@@ -17,23 +18,21 @@ public sealed class GeminiExtractor
 
         {2}
 
-        Return a JSON **array** where each element represents one file with the following structure:
+        Return a JSON **array** of transactions:
         [
           {{
-            "file_index": 0,
-            "statement_year": <int — the year the statement covers>,
-            "transactions": [ ... ]
-          }},
-          {{
-            "file_index": 1,
-            "statement_year": <int>,
-            "transactions": [ ... ]
+            "date": "2025-01-15",
+            "post_date": "2025-01-16",
+            "description": "MERCHANT NAME",
+            "amount": 25.40,
+            "category": "Groceries and Supermarkets",
+            "transaction_source": "Card name shown on statement"
           }}
         ]
 
-        Each item in the "transactions" array must have these fields:
-        - "date": transaction date in YYYY/MM/DD format
-        - "post_date": posting date in YYYY/MM/DD format (null if not available)
+        Each transaction item in the array must have these fields:
+        - "date": transaction date in YYYY-MM-DD format
+        - "post_date": posting date in YYYY-MM-DD format (null if not available)
         - "description": merchant / payee description exactly as it appears
         - "amount": numeric amount (positive = debit/purchase, negative = credit/refund/payment)
         - "category": one of the allowed categories listed below
@@ -44,12 +43,11 @@ public sealed class GeminiExtractor
 
         Rules:
         1. Use ONLY the categories listed above. Pick the single best match.
-        2. Process each PDF separately and maintain the file order.
-        3. Each file result MUST include "file_index" matching the PDF order (0, 1, 2, etc.).
-        4. If the year is not explicitly shown, infer it from the statement date or context.
-        5. Payments to the credit card should be negative amounts with category "Insurance and Financial Services".
-        6. Return ONLY the JSON array described above — no markdown fences, no commentary.
-        7. Keep JSON compact (no pretty printing or extra whitespace) to minimize output size.
+        2. Merge all transactions from all PDFs into this single output array.
+        3. If the year is not explicitly shown, infer it from the statement date or context.
+        4. Payments to the credit card should be negative amounts with category "Insurance and Financial Services".
+        5. Return ONLY the JSON array described above — no markdown fences, no commentary.
+        6. Keep JSON compact (no pretty printing or extra whitespace) to minimize output size.
         {1}
         """;
 
@@ -152,7 +150,7 @@ public sealed class GeminiExtractor
             var rawJson = ExtractJsonFromResponse(response);
             _logger.LogDebug("Gemini raw JSON for {Count} file(s): {Raw}", pdfBytesList.Count, rawJson);
 
-            return ParseMultiFileJson(rawJson, fileNames);
+            return ParseTransactionListJson(rawJson, fileNames, pdfBytesList.Count);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
@@ -263,9 +261,10 @@ public sealed class GeminiExtractor
         return trimmed.Trim();
     }
 
-    private static MultiFileExtractionResult ParseMultiFileJson(
-        string json, 
-        IReadOnlyList<string>? fileNames)
+    private static MultiFileExtractionResult ParseTransactionListJson(
+        string json,
+        IReadOnlyList<string>? fileNames,
+        int fileCount)
     {
         JsonNode root;
         try
@@ -280,27 +279,27 @@ public sealed class GeminiExtractor
                 ex);
         }
 
-        if (root is not JsonArray fileArray)
+        if (root is not JsonArray transactionArray)
             throw new InvalidOperationException(
-                $"Expected a JSON array for multiple files, got {root.GetType().Name}.");
+                $"Expected a JSON array of transactions, got {root.GetType().Name}.");
 
-        var results = new List<FileExtractionResult>();
+        var transactions = transactionArray
+            .OfType<JsonObject>()
+            .Select(ParseTransaction)
+            .ToList();
 
-        foreach (var fileNode in fileArray)
-        {
-            if (fileNode is not JsonObject fileObj)
-                continue;
+        var combinedFileName = BuildCombinedFileName(fileNames, fileCount);
+        var extractionResult = new ExtractionResult(null, transactions);
+        var fileResult = new FileExtractionResult(0, combinedFileName, extractionResult, null);
+        return new MultiFileExtractionResult([fileResult]);
+    }
 
-            var fileIndex = fileObj["file_index"]?.GetValue<int>() ?? results.Count;
-            var fileName = GetFileName(fileIndex, fileNames);
-            var statementYear = TryGetStatementYear(fileObj);
-            var transactions = ExtractTransactionsFromObject(fileObj);
+    private static string BuildCombinedFileName(IReadOnlyList<string>? fileNames, int fileCount)
+    {
+        if (fileCount == 1 && fileNames is not null && fileNames.Count > 0)
+            return fileNames[0];
 
-            var extractionResult = new ExtractionResult(statementYear, transactions);
-            results.Add(new FileExtractionResult(fileIndex, fileName, extractionResult, null));
-        }
-
-        return new MultiFileExtractionResult(results);
+        return $"Combined ({fileCount} files)";
     }
 
     private static string GetFileName(int index, IReadOnlyList<string>? fileNames)
@@ -310,40 +309,10 @@ public sealed class GeminiExtractor
             : $"File {index + 1}";
     }
 
-    private static int? TryGetStatementYear(JsonObject obj)
-    {
-        if (obj["statement_year"] is JsonValue yearValue && yearValue.TryGetValue(out int year))
-            return year;
-
-        return null;
-    }
-
-    private static IReadOnlyList<Transaction> ExtractTransactionsFromObject(JsonObject obj)
-    {
-        // Try common transaction array keys
-        JsonArray? transactionArray = null;
-        foreach (var key in new[] { "transactions", "data", "results" })
-        {
-            if (obj[key] is JsonArray arr)
-            {
-                transactionArray = arr;
-                break;
-            }
-        }
-
-        if (transactionArray is null)
-            throw new InvalidOperationException("No transaction array found in JSON object.");
-
-        return transactionArray
-            .OfType<JsonObject>()
-            .Select(ParseTransaction)
-            .ToList();
-    }
-
     private static Transaction ParseTransaction(JsonObject item)
     {
-        var date = item["date"]?.GetValue<string>() ?? string.Empty;
-        var postDate = item["post_date"]?.GetValue<string?>();
+        var date = NormalizeDate(item["date"]?.GetValue<string>()) ?? string.Empty;
+        var postDate = NormalizeDate(item["post_date"]?.GetValue<string?>());
         var description = item["description"]?.GetValue<string>() ?? string.Empty;
         var amount = item["amount"] is JsonValue amountValue 
             ? (decimal)amountValue.GetValue<double>() 
@@ -352,5 +321,18 @@ public sealed class GeminiExtractor
         var transactionSource = item["transaction_source"]?.GetValue<string?>();
 
         return new Transaction(date, postDate, description, amount, category, transactionSource);
+    }
+
+    private static string? NormalizeDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return value;
+
+        var trimmed = value.Trim();
+        var formats = new[] { "yyyy-MM-dd", "yyyy/MM/dd" };
+        if (DateTime.TryParseExact(trimmed, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+            return dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        return trimmed.Replace('/', '-');
     }
 }

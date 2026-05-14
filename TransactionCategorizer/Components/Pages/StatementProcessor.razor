@@ -65,6 +65,17 @@
                    placeholder="e.g. Canadian bank, CAD currency"
                    @bind="_context"
                    disabled="@IsProcessing" />
+
+            <label for="categories-input" class="form-label mt-3">
+                Custom categories
+                <span class="text-muted fw-normal">(optional — comma or newline separated; defaults to appsettings when empty)</span>
+            </label>
+            <textarea id="categories-input"
+                      class="form-control"
+                      rows="4"
+                      placeholder="e.g. Groceries and Supermarkets, Restaurants and Dining"
+                      @bind="_customCategoriesInput"
+                      disabled="@IsProcessing"></textarea>
         </div>
     </div>
 
@@ -180,6 +191,7 @@
 @code {
     private readonly List<IBrowserFile> _selectedFiles = [];
     private string? _context;
+    private string? _customCategoriesInput;
     private string? _error;
     private string _statusMessage = string.Empty;
     private MultiFileExtractionResult? _multiFileResult;
@@ -238,6 +250,7 @@
             _multiFileResult = await GeminiExtractor.ExtractMultipleAsync(
                 pdfBytesList,
                 fileNames,
+                categories: ParseCustomCategories(_customCategoriesInput),
                 context: string.IsNullOrWhiteSpace(_context) ? null : _context);
 
             // Pre-generate the CSV so the download is instant
@@ -270,4 +283,17 @@
         < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
         _ => $"{bytes / (1024.0 * 1024):F1} MB",
     };
+
+    private static IReadOnlyList<string>? ParseCustomCategories(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+
+        var categories = raw
+            .Split([',', '\n', '\r'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return categories.Count == 0 ? null : categories;
+    }
 }
